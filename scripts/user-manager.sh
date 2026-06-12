@@ -12,7 +12,9 @@ load_protocol_gen() {
     local protocol="${1:-}"
     local gen_file="${SCRIPT_DIR}/protocol-gen/${protocol}.sh"
     if [[ -f "$gen_file" ]]; then
+        local _saved_script_dir="$SCRIPT_DIR"
         source "$gen_file"
+        SCRIPT_DIR="$_saved_script_dir"
     else
         log_error "不支持的协议: $protocol (缺少生成器)"
         return 1

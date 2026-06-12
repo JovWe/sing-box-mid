@@ -10,7 +10,7 @@ source "${SCRIPT_DIR}/utils.sh"
 
 # --- 生成单个用户订阅 ---
 gen_user_sub() {
-    local username="$1"
+    local username="${1:-}"
     local format="${2:-all}"
 
     if ! jq -e ".users | has(\"$username\")" "$USERS_FILE" &>/dev/null; then

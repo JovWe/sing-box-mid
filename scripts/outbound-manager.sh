@@ -9,8 +9,8 @@ source "${SCRIPT_DIR}/utils.sh"
 
 # --- 添加出站 ---
 add_outbound() {
-    local name="$1"
-    local out_type="$2"
+    local name="${1:-}"
+    local out_type="${2:-}"
 
     echo "添加出站代理:"
     if [[ -z "$out_type" ]]; then
@@ -131,7 +131,7 @@ EOF
 
 # --- 删除出站 ---
 delete_outbound() {
-    local out_id="$1"
+    local out_id="${1:-}"
 
     if [[ -z "$out_id" ]]; then
         echo "当前出站列表:"
@@ -170,7 +170,7 @@ delete_outbound() {
 
 # --- 编辑出站 ---
 edit_outbound() {
-    local out_id="$1"
+    local out_id="${1:-}"
 
     if [[ -z "$out_id" ]]; then
         list_outbounds
@@ -239,7 +239,7 @@ list_outbounds() {
 
 # --- 显示单个出站详情 ---
 show_outbound() {
-    local out_id="$1"
+    local out_id="${1:-}"
     if ! jq -e ".outbounds[] | select(.id == \"$out_id\")" "$OUTBOUNDS_FILE" &>/dev/null; then
         log_error "出站不存在: $out_id"
         return 1

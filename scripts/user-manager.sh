@@ -9,7 +9,7 @@ source "${SCRIPT_DIR}/utils.sh"
 
 # 加载协议生成器
 load_protocol_gen() {
-    local protocol="$1"
+    local protocol="${1:-}"
     local gen_file="${SCRIPT_DIR}/protocol-gen/${protocol}.sh"
     if [[ -f "$gen_file" ]]; then
         source "$gen_file"
@@ -21,8 +21,8 @@ load_protocol_gen() {
 
 # --- 创建用户数据结构 ---
 create_user_data() {
-    local username="$1"
-    local protocol="$2"
+    local username="${1:-}"
+    local protocol="${2:-}"
     local expire_days="${3:-30}"
     local traffic_limit="${4:-100GB}"
 
@@ -67,8 +67,8 @@ JSON
 
 # --- 添加用户 ---
 add_user() {
-    local username="$1"
-    local protocol="$2"
+    local username="${1:-}"
+    local protocol="${2:-}"
     local expire_days="${3:-30}"
     local traffic_limit="${4:-100GB}"
     local port="${5:-}"
@@ -208,7 +208,7 @@ add_user() {
 
 # --- 删除用户 ---
 delete_user() {
-    local username="$1"
+    local username="${1:-}"
 
     if [[ -z "$username" ]]; then
         read -rp "请输入要删除的用户名: " username
@@ -251,7 +251,7 @@ delete_user() {
 
 # --- 修改用户 ---
 edit_user() {
-    local username="$1"
+    local username="${1:-}"
 
     if [[ -z "$username" ]]; then
         read -rp "请输入要修改的用户名: " username
@@ -337,7 +337,7 @@ edit_user() {
 
 # --- 显示用户详情 ---
 show_user_detail() {
-    local username="$1"
+    local username="${1:-}"
     if ! jq -e ".users | has(\"$username\")" "$USERS_FILE" &>/dev/null; then
         log_error "用户不存在: $username"
         return 1
@@ -409,7 +409,7 @@ show_user_detail() {
 
 # --- 显示用户客户端配置 ---
 show_user_config() {
-    local username="$1"
+    local username="${1:-}"
     local format="${2:-all}"
 
     if ! jq -e ".users | has(\"$username\")" "$USERS_FILE" &>/dev/null; then

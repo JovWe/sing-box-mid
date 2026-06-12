@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #===============================================================================
 # Sing-box Manager - 一键安装脚本
-# 用法: bash <(curl -Ls https://raw.githubusercontent.com/xxx/sb-manager/main/install.sh)
+# 用法: bash <(curl -Ls https://raw.githubusercontent.com/JovWe/sing-box-mid/main/install.sh)
 #===============================================================================
 set -euo pipefail
 
@@ -60,7 +60,7 @@ SB_WEB="${SB_CORE}/web"
 SB_SCRIPTS="${SB_BASE}/scripts"
 SB_LOGS="${SB_BASE}/logs"
 
-GITHUB_REPO="https://raw.githubusercontent.com/your-repo/sb-manager/main"
+GITHUB_REPO="https://raw.githubusercontent.com/JovWe/sing-box-mid/main"
 GITHUB_PROXY="https://ghproxy.com/${GITHUB_REPO}"
 
 # ============================================================================

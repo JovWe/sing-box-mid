@@ -1,0 +1,80 @@
+{{template "base.html" .}}
+{{define "content"}}
+<h3 class="mb-4">出站管理</h3>
+<div class="card table-card">
+    <div class="card-body">
+        <div class="d-flex justify-content-between mb-3">
+            <h5 class="card-title mb-0">出站代理列表</h5>
+            <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addOutboundModal">添加出站</button>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover">
+                <thead>
+                    <tr><th>ID</th><th>名称</th><th>类型</th><th>Tag</th><th>创建时间</th><th>操作</th></tr>
+                </thead>
+                <tbody id="outbound-table-body">
+                    {{range .outbounds}}
+                    <tr>
+                        <td><code>{{.ID}}</code></td>
+                        <td><strong>{{.Name}}</strong></td>
+                        <td><span class="badge bg-secondary">{{.Type}}</span></td>
+                        <td><code>{{.Tag}}</code></td>
+                        <td>{{.CreatedAt}}</td>
+                        <td>
+                            {{if not .Builtin}}
+                            <button class="btn btn-outline-danger btn-sm" hx-delete="/api/outbounds/{{.ID}}" hx-confirm="确认删除?" hx-target="closest tr" hx-swap="outerHTML">删除</button>
+                            {{end}}
+                        </td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+        <h6 class="mt-4">策略组</h6>
+        {{range .strategyGroups}}
+        <div class="card mb-2">
+            <div class="card-body py-2">
+                <strong>{{.Name}}</strong>
+                <span class="badge bg-info ms-2">{{.Type}}</span>
+                <span class="text-muted ms-2">默认: <code>{{.Default}}</code></span>
+                <br>
+                <small class="text-muted">成员: {{range .Outbounds}}<code>{{.}}</code> {{end}}</small>
+            </div>
+        </div>
+        {{end}}
+    </div>
+</div>
+
+<!-- Add Outbound Modal -->
+<div class="modal fade" id="addOutboundModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">添加出站代理</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form hx-post="/api/outbounds" hx-target="#outbound-table-body" hx-swap="innerHTML">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">名称</label>
+                        <input type="text" name="name" class="form-control" placeholder="香港 SOCKS5" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">类型</label>
+                        <select name="type" class="form-select" required>
+                            <option value="socks">SOCKS5</option>
+                            <option value="http">HTTP</option>
+                            <option value="vless">VLESS</option>
+                            <option value="hysteria2">Hysteria2</option>
+                            <option value="tuic">TUIC</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="submit" class="btn btn-primary">添加</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{{end}}

@@ -289,7 +289,8 @@ run_daemon() {
     done
 }
 
-# --- 入口 ---
+# --- 入口 (仅在直接执行时运行) ---
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 if [[ "${1:-daemon}" == "daemon" ]]; then
     run_daemon
 elif [[ "${1:-}" == "show" ]]; then
@@ -298,4 +299,5 @@ elif [[ "${1:-}" == "reset" ]]; then
     reset_traffic "${2:-}"
 elif [[ "${1:-}" == "check" ]]; then
     check_traffic_limits
+fi
 fi

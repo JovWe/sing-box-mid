@@ -535,9 +535,17 @@ init_dirs() {
              "$SB_DATA" "$SB_CERTS" "$SB_WEB/templates" "$SB_WEB/static" \
              "$SB_SCRIPTS" "$SB_LOGS"
 
-    # 初始化数据文件
-    [[ ! -f "$USERS_FILE" ]] && echo '{"version":1,"users":{}}' > "$USERS_FILE"
-    [[ ! -f "$OUTBOUNDS_FILE" ]] && echo '{"version":1,"outbounds":[{"id":"out_direct","name":"直连","type":"direct","tag":"direct","builtin":true,"config":{}}],"strategy_groups":[{"id":"sg_default","name":"默认出站","type":"selector","default":"out_direct","outbounds":["out_direct"]}]}' > "$OUTBOUNDS_FILE"
-    [[ ! -f "$TRAFFIC_FILE" ]] && echo '{"version":1,"last_reset":0,"users":{},"total":{"down":0,"up":0}}' > "$TRAFFIC_FILE"
-    [[ ! -f "$SETTINGS_FILE" ]] && echo '{"version":1,"domain":"","email":"","web_port":2053,"web_username":"admin","web_password_hash":"","jwt_secret":"","subscription_domain":"","installed_protocols":[],"fail2ban_enabled":false,"ufw_enabled":false,"traffic_reset_day":1,"installed_at":0}' > "$SETTINGS_FILE"
+    # 初始化数据文件（仅在不存在时创建）
+    if [[ ! -f "$USERS_FILE" ]]; then
+        echo '{"version":1,"users":{}}' > "$USERS_FILE"
+    fi
+    if [[ ! -f "$OUTBOUNDS_FILE" ]]; then
+        echo '{"version":1,"outbounds":[{"id":"out_direct","name":"直连","type":"direct","tag":"direct","builtin":true,"config":{}}],"strategy_groups":[{"id":"sg_default","name":"默认出站","type":"selector","default":"out_direct","outbounds":["out_direct"]}]}' > "$OUTBOUNDS_FILE"
+    fi
+    if [[ ! -f "$TRAFFIC_FILE" ]]; then
+        echo '{"version":1,"last_reset":0,"users":{},"total":{"down":0,"up":0}}' > "$TRAFFIC_FILE"
+    fi
+    if [[ ! -f "$SETTINGS_FILE" ]]; then
+        echo '{"version":1,"domain":"","email":"","web_port":2053,"web_username":"admin","web_password_hash":"","jwt_secret":"","subscription_domain":"","installed_protocols":[],"fail2ban_enabled":false,"ufw_enabled":false,"traffic_reset_day":1,"installed_at":0}' > "$SETTINGS_FILE"
+    fi
 }

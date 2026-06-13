@@ -1,16 +1,14 @@
 # Sing-box Mid
 
-Sing-box VPS 中转站部署管理系统，支持多协议代理节点的自动化部署、用户管理、流量统计与 Web 管理面板。
+Sing-box VPS 中转站部署管理系统, 基于模块化 bash 脚本实现, 支持多协议代理节点自动化部署、用户管理、流量统计和 Web 管理面板。
 
 ## 支持协议
 
-| 协议 | 说明 |
-|------|------|
-| VLESS + Reality | 下一代 TLS 伪装协议，抗封锁能力强 |
-| Hysteria2 | 基于 QUIC 的高速传输协议 |
-| TUIC v5 | 轻量级 QUIC 代理协议 |
-| AnyTLS | 任意 TLS 流量伪装 |
-| ShadowTLS v3 | TLS 指纹伪装协议 |
+- VLESS + Reality
+- Hysteria2
+- TUIC v5
+- AnyTLS (Trojan over TLS)
+- ShadowTLS v3
 
 ## 一键安装
 
@@ -21,55 +19,96 @@ bash <(curl -Ls https://raw.githubusercontent.com/JovWe/sing-box-mid/main/instal
 ## 管理命令
 
 ```bash
-sb-manager add-user        # 添加用户
-sb-manager list-users      # 查看所有用户
-sb-manager add-outbound    # 添加上游出站代理
-sb-manager show-traffic    # 查看流量统计
-sb-manager help            # 查看所有命令
+sb-manager help              # 查看所有命令
+
+# 用户管理
+sb-manager add-user          # 交互式添加用户
+sb-manager add-user <name> <protocol>   # 非交互式
+sb-manager list-users        # 查看所有用户
+sb-manager show-user <name>  # 查看用户详情
+sb-manager show-config <name>  # 查看客户端配置
+sb-manager delete-user <name>
+sb-manager edit-user <name>
+
+# 出站管理
+sb-manager add-outbound
+sb-manager list-outbounds
+sb-manager delete-outbound <id>
+sb-manager strategy-group
+
+# 流量统计
+sb-manager show-traffic
+sb-manager reset-traffic
+
+# 订阅
+sb-manager gen-sub <name> [format]  # format: link, sing-box, clash-meta
+
+# 系统
+sb-manager status            # 系统状态
+sb-manager reload            # 重新生成主配置并重载
+sb-manager restart
+sb-manager logs
+sb-manager update            # 更新 sing-box 内核
+sb-manager version
 ```
 
-## 功能特性
-
-- **多协议支持**: 同时运行 VLESS Reality、Hysteria2、TUIC、AnyTLS、ShadowTLS
-- **用户管理**: 创建/删除/编辑用户，支持到期时间和流量限制
-- **出站管理**: 管理上游代理出站，支持策略组路由
-- **流量统计**: 实时流量采集，超限自动封禁
-- **订阅系统**: 自动生成 Sing-box / Clash Meta / V2RayN 格式订阅
-- **Web 面板**: 可视化管理界面（默认端口 2053）
-- **系统优化**: 自动开启 BBR、TCP Fast Open、文件描述符优化
-
-## 项目结构
+## 架构一览
 
 ```
-├── install.sh                  # 一键安装脚本
-├── scripts/
-│   ├── manager.sh              # 主管理 CLI
-│   ├── utils.sh                # 公共工具函数库
-│   ├── user-manager.sh         # 用户管理
-│   ├── outbound-manager.sh     # 出站管理
-│   ├── config-generator.sh     # Sing-box 配置生成
-│   ├── traffic-collector.sh    # 流量采集守护进程
-│   ├── sub-generator.sh        # 订阅生成器
-│   ├── cron-daily.sh           # 每日定时任务
-│   └── protocol-gen/           # 协议生成器
-│       ├── vless-reality.sh
-│       ├── hysteria2.sh
-│       ├── tuic.sh
-│       ├── anytls.sh
-│       └── shadowtls.sh
-└── web-backend/                # Web 管理面板 (Go + Gin)
-    ├── main.go
-    ├── handlers/
-    ├── middleware/
-    ├── models/
-    └── templates/
+install.sh                    ← 一键安装脚本（独立, 从 GitHub 拉取其他文件）
+
+/usr/local/bin/sb-manager     ← 命令行入口（exec bash /opt/sb-manager/scripts/manager.sh）
+
+/opt/sb-manager/scripts/
+├── manager.sh                ← CLI 唯一入口: set -euo pipefail + _load_module 加载器
+├── traffic-collector.sh      ← systemd daemon 入口 (run_daemon)
+├── cron-daily.sh             ← 每日定时任务（用户过期 + 流量超限检查）
+└── modules/                  ← 纯函数模块: 只定义函数/常量, 被按需 source
+    ├── utils.sh              ← 公共工具 (日志, JSON, 随机, 端口, 系统优化, sing-box 安装)
+    ├── user-manager.sh       ← 用户管理 + load_protocol_gen
+    ├── outbound-manager.sh   ← 出站管理 + 策略组
+    ├── config-generator.sh   ← 生成 sing-box 主配置 config.json
+    ├── sub-generator.sh      ← 订阅链接生成
+    ├── traffic-collector.sh  ← 流量统计/重置
+    └── protocol-gen/         ← 各协议配置与客户端生成
+        ├── vless-reality.sh
+        ├── hysteria2.sh
+        ├── tuic.sh
+        ├── anytls.sh
+        └── shadowtls.sh
+```
+
+### 模块加载机制 `_load_module`
+
+```bash
+# manager.sh 内部实现
+declare -A _SB_LOADED_MODULES=()
+_load_module() {
+  local rel="$1"
+  [[ -z "${_SB_LOADED_MODULES[$rel]+x}" ]] || return 0   # 已加载则跳过
+  source "${SB_SCRIPTS_DIR}/modules/${rel}"
+  _SB_LOADED_MODULES["$rel"]=1
+}
+```
+
+优势:
+- **按需加载**: 执行 `show-traffic` 只加载 utils + traffic-collector, 不必加载协议生成器
+- **全局去重**: 即使 `user-manager.sh` 和 `sub-generator.sh` 都调用 `load_protocol_gen`, 底层协议脚本只被 source 一次
+- **零污染**: 模块无 `SCRIPT_DIR`, `set -e`, `shebang`, 不会污染调用者环境
+
+### 系统服务
+
+```
+sing-box.service   → /opt/sb-manager/bin/sing-box run -c core/config/config.json
+sb-traffic.service → bash /opt/sb-manager/scripts/traffic-collector.sh daemon
+/etc/cron.d/sb-manager → 每日 00:05 运行 cron-daily.sh
 ```
 
 ## 系统要求
 
-- Debian 12/13 或 Ubuntu 22.04/24.04
+- Debian 12/13 / Ubuntu 22.04/24.04 / CentOS 8-9
 - root 权限
-- 推荐 x86_64 或 ARM64 架构
+- x86_64 或 ARM64
 
 ## License
 

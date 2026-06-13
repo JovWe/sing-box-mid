@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 #===============================================================================
 # Sing-box Manager - 每日定时任务
-# 用户过期检查 + 流量封禁检查
+# 任务: 用户过期检测 + 流量超限检测
 #===============================================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/utils.sh"
-source "${SCRIPT_DIR}/user-manager.sh"
+SB_MANAGER_ROOT="/opt/sb-manager"
+SB_MODULES_DIR="${SB_MANAGER_ROOT}/scripts/modules"
+SB_DATA="${SB_MANAGER_ROOT}/data"
+SB_LOGS="${SB_MANAGER_ROOT}/logs"
 
-main() {
-    log_info "========== 每日定时任务开始 =========="
-    cron_check_users
-    log_info "========== 每日定时任务完成 =========="
-}
+USERS_FILE="${SB_DATA}/users.json"
+TRAFFIC_FILE="${SB_DATA}/traffic.json"
+mkdir -p "${SB_DATA}" "${SB_LOGS}"
 
-main "$@" >> "${SB_LOGS}/cron-daily.log" 2>&1
+source "${SB_MODULES_DIR}/utils.sh"
+source "${SB_MODULES_DIR}/user-manager.sh"
+source "${SB_MODULES_DIR}/traffic-collector.sh"
+
+log_info "========== 每日定时任务开始 =========="
+cron_check_users
+check_traffic_limits
+log_info "========== 每日定时任务完成 =========="

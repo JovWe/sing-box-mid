@@ -1,380 +1,171 @@
 #!/usr/bin/env bash
 #===============================================================================
-# Sing-box Manager - 主管理脚本 (CLI)
+# Sing-box Manager - CLI 唯一入口
+# 所有业务逻辑都在 scripts/modules/ 下, 由 _load_module 按需加载
 # 用法: sb-manager <command> [args...]
 #===============================================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/utils.sh"
+# ---- 路径常量 ----
+SB_MANAGER_ROOT="/opt/sb-manager"
+SB_SCRIPTS_DIR="${SB_MANAGER_ROOT}/scripts"
+SB_MODULES_DIR="${SB_SCRIPTS_DIR}/modules"
+SB_BIN="${SB_MANAGER_ROOT}/bin"
+SB_CONFIG="${SB_MANAGER_ROOT}/core/config"
+SB_DATA="${SB_MANAGER_ROOT}/data"
+SB_CERTS="${SB_MANAGER_ROOT}/certs"
+SB_LOGS="${SB_MANAGER_ROOT}/logs"
 
-# 加载子模块
-source "${SCRIPT_DIR}/user-manager.sh"
-source "${SCRIPT_DIR}/outbound-manager.sh"
-source "${SCRIPT_DIR}/sub-generator.sh"
+USERS_FILE="${SB_DATA}/users.json"
+OUTBOUNDS_FILE="${SB_DATA}/outbounds.json"
+TRAFFIC_FILE="${SB_DATA}/traffic.json"
+SETTINGS_FILE="${SB_DATA}/settings.json"
+SINGBOX_CONFIG="${SB_CONFIG}/config.json"
 
-# --- 导入配置生成器 ---
-import_config_gen() {
-    source "${SCRIPT_DIR}/config-generator.sh"
-}
+mkdir -p "${SB_BIN}" "${SB_CONFIG}/inbound" "${SB_CONFIG}/outbound" \
+         "${SB_DATA}" "${SB_CERTS}" "${SB_LOGS}"
 
-# --- 导入流量采集器 ---
-import_traffic() {
-    source "${SCRIPT_DIR}/traffic-collector.sh"
-}
+# 数据文件初始化（若不存在）
+[[ ! -f "$USERS_FILE" ]]    && echo '{"version":1,"users":{}}' > "$USERS_FILE"
+[[ ! -f "$TRAFFIC_FILE" ]]  && echo '{"version":1,"last_reset":0,"users":{},"total":{"down":0,"up":0}}' > "$TRAFFIC_FILE"
+[[ ! -f "$OUTBOUNDS_FILE" ]] && echo '{"version":1,"outbounds":[{"id":"out_direct","name":"直连","type":"direct","tag":"direct","builtin":true,"config":{}}],"strategy_groups":[{"id":"sg_default","name":"默认出站","type":"selector","default":"out_direct","outbounds":["out_direct"]}]}' > "$OUTBOUNDS_FILE"
+[[ ! -f "$SETTINGS_FILE" ]] && echo '{"version":1,"domain":"","email":"","web_port":2053,"web_username":"admin","web_password_hash":"","jwt_secret":"","subscription_domain":"","installed_protocols":[],"fail2ban_enabled":false,"ufw_enabled":false,"traffic_reset_day":1,"installed_at":0}' > "$SETTINGS_FILE"
 
-# --- 帮助 ---
-show_help() {
-    cat << 'HELP'
-╔══════════════════════════════════════════════════════════╗
-║           Sing-box Manager - 中转站管理系统              ║
-╚══════════════════════════════════════════════════════════╝
+# ---- 模块加载器（防止重复 source）----
+declare -A _SB_LOADED_MODULES=()
 
-用法: sb-manager <command> [options]
-
-┌─────────────────────────────────────────────────────────┐
-│ 用户管理                                                 │
-├─────────────────────────────────────────────────────────┤
-│  add-user     [name] [protocol] [expire] [limit] [port] │
-│  delete-user  [username]                                │
-│  edit-user    [username]                                │
-│  list-users                                             │
-│  show-user    [username]                                │
-│  show-config  [username]                                │
-├─────────────────────────────────────────────────────────┤
-│ 出站管理                                                 │
-├─────────────────────────────────────────────────────────┤
-│  add-outbound     [name] [type]                         │
-│  delete-outbound  [outbound_id]                         │
-│  edit-outbound    [outbound_id]                         │
-│  list-outbounds                                         │
-│  show-outbound    [outbound_id]                         │
-│  strategy-group                                         │
-├─────────────────────────────────────────────────────────┤
-│ 流量统计                                                 │
-├─────────────────────────────────────────────────────────┤
-│  show-traffic     [username]                            │
-│  reset-traffic    [username]                            │
-├─────────────────────────────────────────────────────────┤
-│ 订阅系统                                                 │
-├─────────────────────────────────────────────────────────┤
-│  show-sub         [username]                            │
-│  gen-sub          [username] [format]                   │
-│    格式: sing-box, clash-meta, v2rayn, link, all       │
-├─────────────────────────────────────────────────────────┤
-│ 系统管理                                                 │
-├─────────────────────────────────────────────────────────┤
-│  status          查看系统状态                            │
-│  reload          重新生成配置并重载                      │
-│  restart         重启 Sing-box                           │
-│  logs            查看日志 (最近 50 行)                   │
-│  update          更新 Sing-box 内核                      │
-│  version         显示版本信息                            │
-│  help            显示此帮助                              │
-└─────────────────────────────────────────────────────────┘
-
-HELP
-}
-
-# --- 查看状态 ---
-show_status() {
-    echo ""
-    echo -e "${CYAN}╔══════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║           Sing-box Manager 系统状态                 ║${NC}"
-    echo -e "${CYAN}╚══════════════════════════════════════════════════════╝${NC}"
-    echo ""
-
-    # Sing-box 状态
-    if systemctl is-active --quiet sing-box 2>/dev/null; then
-        echo -e "Sing-box:    ${GREEN}运行中${NC}"
-    else
-        echo -e "Sing-box:    ${RED}停止${NC}"
+_load_module() {
+    local rel_path="$1"
+    local abs_path="${SB_MODULES_DIR}/${rel_path}"
+    if [[ -z "${_SB_LOADED_MODULES[$rel_path]+x}" ]]; then
+        if [[ -f "$abs_path" ]]; then
+            source "$abs_path"
+            _SB_LOADED_MODULES["$rel_path"]=1
+        else
+            echo "模块不存在: $abs_path" >&2
+            return 1
+        fi
     fi
-
-    # 版本
-    if [[ -x "${SB_BIN}/sing-box" ]]; then
-        local ver
-        ver=$("${SB_BIN}/sing-box" version 2>/dev/null | head -1 || echo "unknown")
-        echo -e "版本:        $ver"
-    fi
-
-    # 用户统计
-    local total_users
-    total_users=$(jq '.users | length' "$USERS_FILE" 2>/dev/null || echo 0)
-    local active_users
-    active_users=$(jq '[.users[] | select(.status == "active")] | length' "$USERS_FILE" 2>/dev/null || echo 0)
-    local online_users
-    online_users=$(jq '[.users[] | select(.online == true)] | length' "$USERS_FILE" 2>/dev/null || echo 0)
-    echo -e "用户总数:    $total_users (${GREEN}${active_users} 启用${NC}, ${online_users} 在线)"
-
-    # 出站统计
-    local outbound_count
-    outbound_count=$(jq '.outbounds | length' "$OUTBOUNDS_FILE" 2>/dev/null || echo 0)
-    echo -e "出站数量:    $outbound_count"
-
-    # 流量统计
-    local total_down
-    total_down=$(json_get "$TRAFFIC_FILE" ".total.down" "0")
-    local total_up
-    total_up=$(json_get "$TRAFFIC_FILE" ".total.up" "0")
-    echo -e "总流量:      $(format_bytes $total_down) ↓  $(format_bytes $total_up) ↑"
-
-    # 系统资源
-    if command -v free &>/dev/null; then
-        local mem
-        mem=$(free -m | awk 'NR==2{printf "%.0f", $3*100/$2}')
-        echo -e "内存使用:    ${mem}%"
-    fi
-    if command -v uptime &>/dev/null; then
-        echo -e "系统运行:    $(uptime -p)"
-    fi
-
-    # 防火墙
-    if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
-        echo -e "防火墙:      ${GREEN}UFW 已启用${NC}"
-    else
-        echo -e "防火墙:      ${YELLOW}未启用${NC}"
-    fi
-
-    echo ""
+    return 0
 }
 
-# --- 查看日志 ---
-show_logs() {
-    local log_file="${SB_LOGS}/sing-box.log"
-    if [[ -f "$log_file" ]]; then
-        tail -50 "$log_file"
-    else
-        echo "暂无日志"
-    fi
-}
+# 基础模块先加载
+_load_module "utils.sh" || { echo "加载 utils.sh 失败" >&2; exit 1; }
 
-# --- 更新 Sing-box ---
-update_singbox() {
-    log_info "更新 Sing-box 到最新版本..."
-    install_singbox "latest"
-    sb_reload
-    log_info "Sing-box 更新完成"
-}
-
-# --- 版本信息 ---
-show_version() {
-    echo "Sing-box Manager v1.0.0"
-    echo "Build: 2024-01"
-    if [[ -x "${SB_BIN}/sing-box" ]]; then
-        "${SB_BIN}/sing-box" version
-    fi
-}
-
-# --- 快速安装 (供 install.sh 调用) ---
-quick_setup() {
-    local protocol="${1:-}"
-
-    init_dirs
-    install_deps
-    install_singbox "latest"
-
-    # 设置默认管理员密码
-    local admin_pass
-    admin_pass=$(gen_password 16)
-    local pass_hash
-    pass_hash=$(echo -n "$admin_pass" | openssl passwd -6 -stdin 2>/dev/null || echo -n "$admin_pass" | sha256sum | cut -d' ' -f1)
-    json_set "$SETTINGS_FILE" '.web_password_hash' "\"$pass_hash\""
-    json_set "$SETTINGS_FILE" '.jwt_secret' "\"$(gen_token)\""
-    json_set "$SETTINGS_FILE" '.installed_at' "$(date +%s)"
-
-    # 创建 systemd 服务
-    create_systemd_service
-
-    # 系统优化
-    optimize_system
-
-    echo ""
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}  Sing-box Manager 安装完成!${NC}"
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "Web 管理:   http://$(get_public_ip):2053"
-    echo -e "用户名:     admin"
-    echo -e "密码:       ${admin_pass}"
-    echo -e "${GREEN}========================================${NC}"
-    echo ""
-    echo "管理命令: sb-manager <command>"
-    echo "查看帮助: sb-manager help"
-    echo ""
-    echo "下一步:"
-    echo "  1. sb-manager add-user    添加用户"
-    echo "  2. sb-manager add-outbound 添加出站"
-    echo "  3. 在浏览器中打开 Web 管理面板"
-    echo ""
-}
-
-# --- 创建 systemd 服务 ---
-create_systemd_service() {
-    log_info "创建 systemd 服务..."
-    cat > /etc/systemd/system/sing-box.service << 'SYSTEMD'
-[Unit]
-Description=Sing-box Service
-Documentation=https://sing-box.sagernet.org
-After=network.target nss-lookup.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/opt/sb-manager/bin/sing-box run -c /opt/sb-manager/core/config/config.json
-Restart=on-failure
-RestartSec=5s
-LimitNOFILE=1000000
-LimitNPROC=65535
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-
-[Install]
-WantedBy=multi-user.target
-SYSTEMD
-
-    cat > /etc/systemd/system/sb-traffic.service << SYSTEMD
-[Unit]
-Description=Sing-box Traffic Collector
-After=sing-box.service
-Requires=sing-box.service
-
-[Service]
-Type=simple
-User=root
-ExecStart=/bin/bash /opt/sb-manager/scripts/traffic-collector.sh daemon
-Restart=always
-RestartSec=10s
-
-[Install]
-WantedBy=multi-user.target
-SYSTEMD
-
-    systemctl daemon-reload
-    systemctl enable sing-box 2>/dev/null || true
-    systemctl enable sb-traffic 2>/dev/null || true
-    log_info "Systemd 服务创建完成"
-}
-
-# --- 创建管理命令别名 ---
-install_cli() {
-    log_info "安装 sb-manager 命令行工具..."
-    local cli_path="/usr/local/bin/sb-manager"
-    cat > "$cli_path" << 'CLI'
-#!/usr/bin/env bash
-exec bash /opt/sb-manager/scripts/manager.sh "$@"
-CLI
-    chmod +x "$cli_path"
-    log_info "命令行工具已安装: sb-manager"
-}
-
-# ============================================================================
-# 主入口
-# ============================================================================
-main() {
-    # 非 root 也允许查看帮助和状态
+# ---- CLI 分发 ----
+_main() {
     local cmd="${1:-help}"
     shift || true
 
-    # 需要 root 的命令
     case "$cmd" in
-        add-user|delete-user|edit-user|show-config|show-user|list-users)
-            check_root
-            ;;
-        add-outbound|delete-outbound|edit-outbound|list-outbounds|show-outbound|strategy-group)
-            check_root
-            ;;
-        reload|restart|update)
-            check_root
-            ;;
-    esac
-
-    case "$cmd" in
-        # --- 用户管理 ---
+        # ========== 用户管理 ==========
         add-user)
+            _load_module "user-manager.sh" || exit 1
             add_user "$@"
             ;;
         delete-user)
+            _load_module "user-manager.sh" || exit 1
             delete_user "$@"
             ;;
         edit-user)
+            _load_module "user-manager.sh" || exit 1
             edit_user "$@"
             ;;
         list-users)
+            _load_module "user-manager.sh" || exit 1
             list_users
             ;;
         show-user)
+            _load_module "user-manager.sh" || exit 1
             show_user_detail "${1:-}"
             ;;
         show-config)
-            show_user_config "${1:-}" "${2:-all}"
+            _load_module "user-manager.sh" || exit 1
+            show_user_config "${1:-}"
             ;;
 
-        # --- 出站管理 ---
+        # ========== 出站管理 ==========
         add-outbound)
+            _load_module "outbound-manager.sh" || exit 1
             add_outbound "$@"
             ;;
         delete-outbound)
+            _load_module "outbound-manager.sh" || exit 1
             delete_outbound "$@"
             ;;
         edit-outbound)
+            _load_module "outbound-manager.sh" || exit 1
             edit_outbound "$@"
             ;;
         list-outbounds)
+            _load_module "outbound-manager.sh" || exit 1
             list_outbounds
             ;;
         show-outbound)
-            show_outbound "${1:-}"
+            _load_module "outbound-manager.sh" || exit 1
+            list_outbounds
             ;;
         strategy-group)
-            manage_strategy_group "$@"
+            _load_module "outbound-manager.sh" || exit 1
+            manage_strategy_group
             ;;
 
-        # --- 流量统计 ---
+        # ========== 流量统计 ==========
         show-traffic)
-            import_traffic
-            show_traffic "${1:-}"
+            _load_module "traffic-collector.sh" || exit 1
+            show_traffic
             ;;
         reset-traffic)
-            import_traffic
+            _load_module "traffic-collector.sh" || exit 1
             reset_traffic "${1:-}"
             ;;
 
-        # --- 订阅系统 ---
+        # ========== 订阅系统 ==========
         show-sub)
+            _load_module "sub-generator.sh" || exit 1
             show_sub "${1:-}"
             ;;
         gen-sub)
-            import_traffic
+            _load_module "user-manager.sh" || exit 1   # load_protocol_gen 在这里
+            _load_module "sub-generator.sh" || exit 1
             gen_user_sub "${1:-}" "${2:-all}"
             ;;
 
-        # --- 系统管理 ---
+        # ========== 系统管理 ==========
         status)
-            show_status
+            _status
             ;;
         reload)
-            import_config_gen
-            generate_config && sb_reload
+            _load_module "config-generator.sh" || exit 1
+            generate_config
+            sb_reload
+            log_info "已重载"
             ;;
         restart)
-            systemctl restart sing-box
+            sb_restart
             log_info "Sing-box 已重启"
             ;;
         logs)
-            show_logs
+            if [[ -f "${SB_LOGS}/sing-box.log" ]]; then
+                tail -50 "${SB_LOGS}/sing-box.log"
+            else
+                echo "暂无日志"
+            fi
             ;;
         update)
-            update_singbox
+            install_singbox "latest"
+            sb_reload
             ;;
         version)
-            show_version
-            ;;
-        setup)
-            quick_setup "$@"
+            echo "Sing-box Manager v1.1.0 (模块化架构)"
+            if [[ -x "${SB_BIN}/sing-box" ]]; then
+                "${SB_BIN}/sing-box" version
+            fi
             ;;
 
-        # --- 帮助 ---
+        # ========== 帮助 ==========
         help|--help|-h)
-            show_help
+            _show_help
             ;;
         *)
             echo "未知命令: $cmd"
@@ -384,4 +175,86 @@ main() {
     esac
 }
 
-main "$@"
+_status() {
+    echo ""
+    echo "========== Sing-box Manager 状态 =========="
+    if systemctl is-active --quiet sing-box 2>/dev/null; then
+        echo "Sing-box:    运行中"
+    else
+        echo "Sing-box:    停止"
+    fi
+    if systemctl is-active --quiet sb-traffic 2>/dev/null; then
+        echo "流量采集:    运行中"
+    else
+        echo "流量采集:    未启动"
+    fi
+    if [[ -x "${SB_BIN}/sing-box" ]]; then
+        echo "版本:        $("${SB_BIN}/sing-box" version 2>/dev/null | head -1)"
+    fi
+    local user_count
+    user_count=$(jq '.users | length' "$USERS_FILE" 2>/dev/null || echo 0)
+    echo "用户数:      ${user_count}"
+    local ob_count
+    ob_count=$(jq '.outbounds | length' "$OUTBOUNDS_FILE" 2>/dev/null || echo 0)
+    echo "出站数:      ${ob_count}"
+    local total_down total_up
+    total_down=$(json_get "$TRAFFIC_FILE" '.total.down' '0')
+    total_up=$(json_get "$TRAFFIC_FILE" '.total.up' '0')
+    echo "总流量:      ↓ $(format_bytes "$total_down") / ↑ $(format_bytes "$total_up")"
+    echo ""
+}
+
+_show_help() {
+    cat << 'HELP'
+╔══════════════════════════════════════════════════════════════╗
+║           Sing-box Manager - 中转站管理系统                  ║
+╚══════════════════════════════════════════════════════════════╝
+
+用法: sb-manager <command> [options]
+
+┌─────────────────────────────────────────────────────────────┐
+│ 用户管理                                                      │
+├─────────────────────────────────────────────────────────────┤
+│  add-user     [name] [protocol] [expire] [limit] [port]     │
+│  delete-user  [username]                                      │
+│  edit-user    [username]                                      │
+│  list-users                                                   │
+│  show-user    [username]                                      │
+│  show-config  [username]                                      │
+├─────────────────────────────────────────────────────────────┤
+│ 出站管理                                                      │
+├─────────────────────────────────────────────────────────────┤
+│  add-outbound     [name] [type]                               │
+│  delete-outbound  [outbound_id]                               │
+│  edit-outbound    [outbound_id]                               │
+│  list-outbounds                                               │
+│  show-outbound    [outbound_id]                               │
+│  strategy-group                                               │
+├─────────────────────────────────────────────────────────────┤
+│ 流量统计                                                      │
+├─────────────────────────────────────────────────────────────┤
+│  show-traffic     [username]                                  │
+│  reset-traffic    [username]                                  │
+├─────────────────────────────────────────────────────────────┤
+│ 订阅系统                                                      │
+├─────────────────────────────────────────────────────────────┤
+│  show-sub         [username]                                  │
+│  gen-sub          [username] [format]                        │
+│    格式: link, sing-box, clash-meta, all                    │
+├─────────────────────────────────────────────────────────────┤
+│ 系统管理                                                      │
+├─────────────────────────────────────────────────────────────┤
+│  status          查看系统状态                                  │
+│  reload          重新生成配置并重载                            │
+│  restart         重启 Sing-box                                 │
+│  logs            查看日志 (最近 50 行)                         │
+│  update          更新 Sing-box 内核                            │
+│  version         显示版本信息                                  │
+│  help            显示此帮助                                    │
+└─────────────────────────────────────────────────────────────┘
+
+协议类型: vless-reality, hysteria2, tuic, anytls, shadowtls
+HELP
+}
+
+_main "$@"

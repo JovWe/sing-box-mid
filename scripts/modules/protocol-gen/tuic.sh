@@ -1,46 +1,30 @@
-# Sing-box Manager - TUIC v5 协议生成器（精简）
-# 提供: gen_tuic_config
-# 端口默认随机 10000-60000
-
+# TUIC v5 协议生成器
 gen_tuic_config() {
-    local username="$1"
-    local port="${2:-$(gen_random_port 10000 60000)}"
-
+    local username="$1" port="${2:-$(gen_random_port)}"
     log_info "生成 TUIC v5: $username (端口 $port)"
-
-    local uuid password
-    uuid=$(gen_uuid)
-    password=$(gen_password 16)
-
-    # 证书
-    local domain
-    domain=$(json_get "$SETTINGS_FILE" '.domain' "$(get_public_ip)")
-    local cert="${SB_CERTS}/${domain}.crt"
-    local key="${SB_CERTS}/${domain}.key"
-    if [[ ! -f "$cert" ]]; then
-        mkdir -p "$SB_CERTS"
-        openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$cert" \
-            -days 3650 -nodes -subj "/CN=${domain}" &>/dev/null || true
-    fi
-
-    # 写 users.json
-    jq --arg name "$username" --arg uuid "$uuid" --arg pw "$password" --argjson port "$port" \
-       '.users[$name].credentials.uuid = $uuid
-        | .users[$name].credentials.password = $pw
-        | .users[$name].inbound.port = $port
-        | .users[$name].inbound.listen = "0.0.0.0"
-        | .users[$name].inbound.tag = ("inbound-" + $name)
-        | .users[$name].inbound.network = "udp"' \
-       "$USERS_FILE" > "${USERS_FILE}.tmp" && mv "${USERS_FILE}.tmp" "$USERS_FILE"
-
-    # 写 inbound 片段
+    local uuid pw; uuid=$(gen_uuid); pw=$(gen_password 16)
+    local creds; creds=$(jq -n --arg u "$uuid" --arg pw "$pw" '{uuid:$u, password:$pw}')
+    db_user_set_creds "$username" "$creds"
+    db_user_set_inbound "$username" "$port"
+    local domain; domain=$(hostname -f 2>/dev/null || get_public_ip)
+    local cert="${SB_CERTS}/tuic.crt" key="${SB_CERTS}/tuic.key"
+    [[ -f "$cert" ]] || openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$cert" -days 3650 -nodes -subj "/CN=${domain}" &>/dev/null || true
     jq -n --arg tag "inbound-$username" --argjson port "$port" \
-          --arg uuid "$uuid" --arg pw "$password" --arg cert "$cert" --arg key "$key" \
+          --arg uuid "$uuid" --arg pw "$pw" --arg cert "$cert" --arg key "$key" \
           '{type:"tuic", tag:$tag, listen:"0.0.0.0", listen_port:$port,
             users:[{uuid:$uuid, password:$pw}],
             tls:{enabled:true, certificate_path:$cert, key_path:$key, alpn:["h3"]},
             congestion_control:"bbr"}' \
        > "${SB_CONFIG}/inbound/${username}.json"
-
-    log_ok "TUIC v5 配置完成: $username"
+    log_ok "TUIC v5 完成: $username"
+}
+gen_tuic_client() {
+    local username="$1"
+    local row; row=$(sqlite3 "$DB_FILE" -json "SELECT port,credentials FROM users WHERE username='$username';" 2>/dev/null | jq -r '.[0] // empty')
+    [[ -z "$row" ]] && { log_error "用户不存在"; return 1; }
+    local port; port=$(echo "$row" | jq -r '.port')
+    local uuid pw; uuid=$(echo "$row" | jq -r '.credentials.uuid')
+    pw=$(echo "$row" | jq -r '.credentials.password')
+    local server; server=$(get_public_ip)
+    echo "tuic://${uuid}:${pw}@${server}:${port}/?congestion_control=bbr&alpn=h3#${username}"
 }

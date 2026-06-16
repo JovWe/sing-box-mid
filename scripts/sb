@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+#===============================================================================
+# Sing-box Manager - CLI 入口
+# 用法: sb <command> [args...]
+#===============================================================================
+set -euo pipefail
+
+# ---- 路径 ----
+SB_ROOT="/opt/sb"
+SB_MODULES="${SB_ROOT}/scripts/modules"
+
+# ---- 模块加载器 (去重) ----
+_loaded_modules=""
+_load_module() {
+    local name="$1"
+    # 已加载跳过
+    if [[ "$_loaded_modules" == *"|${name}|"* ]]; then return 0; fi
+    local f="${SB_MODULES}/${name}"
+    if [[ ! -f "$f" ]]; then
+        echo "ERROR: 模块未找到: ${name}" >&2
+        return 1
+    fi
+    source "$f"
+    _loaded_modules+="|${name}|"
+}
+
+# ---- 颜色 ----
+RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; NC=$'\033[0m'
+
+log_info()  { echo -e "${CYAN}[INFO]${NC}  $(date '+%Y-%m-%d %H:%M:%S')  $*"; }
+log_ok()    { echo -e "${GREEN}[OK]${NC}     $(date '+%Y-%m-%d %H:%M:%S')  $*"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $(date '+%Y-%m-%d %H:%M:%S')  $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%Y-%m-%d %H:%M:%S')  $*" >&2; }
+
+# ---- 初始化数据库 ----
+_load_module "db.sh"
+db_init
+
+# ---- 帮助 ----
+show_help() {
+    cat <<'HELP'
+用法: sb <command> [args...]
+
+用户管理:
+  add-user [用户名]                添加用户
+  edit-user <用户名>               编辑用户 (到期/流量/出站)
+  list-users                       列出所有用户
+  delete-user <用户名>             删除用户
+  show-config <用户名>             显示客户端配置
+  link <用户名>                    显示分享链接
+
+出站管理:
+  add-outbound [名称] [类型] [地址] [端口]  添加上游出站
+  list-outbounds                             列出所有出站
+  delete-outbound <tag>                      删除出站
+  set-outbound <tag>                         设置全局出站
+
+系统管理:
+  status                           查看运行状态
+  restart                          重启 sing-box
+  stop                             停止 sing-box
+  logs [lines]                     查看日志
+
+  help                            显示此帮助
+HELP
+}
+
+# ---- 主路由 ----
+main() {
+    local cmd="${1:-help}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        add-user)
+            _load_module "user-manager.sh"
+            add_user "$@"
+            ;;
+        edit-user)
+            _load_module "user-manager.sh"
+            edit_user "${1:-}"
+            ;;
+        list-users)
+            _load_module "user-manager.sh"
+            list_users
+            ;;
+        delete-user)
+            _load_module "user-manager.sh"
+            delete_user "${1:-}"
+            ;;
+        show-config)
+            _load_module "user-manager.sh"
+            show_config "${1:-}"
+            ;;
+        link)
+            _load_module "user-manager.sh"
+            gen_client_link "${1:-}"
+            ;;
+        add-outbound)
+            _load_module "outbound-manager.sh"
+            add_outbound "$@"
+            ;;
+        list-outbounds)
+            _load_module "outbound-manager.sh"
+            list_outbounds
+            ;;
+        delete-outbound)
+            _load_module "outbound-manager.sh"
+            delete_outbound "${1:-}"
+            ;;
+        set-outbound)
+            _load_module "outbound-manager.sh"
+            set_global_outbound "${1:-}"
+            ;;
+        status)
+            _load_module "config-generator.sh"
+            _load_module "traffic-collector.sh"
+            echo -e "${BOLD}=== Sing-box 状态 ===${NC}"
+            systemctl is-active sing-box &>/dev/null && \
+                echo -e "  sing-box: ${GREEN}运行中${NC}" || \
+                echo -e "  sing-box: ${RED}未运行${NC}"
+            traffic_daemon_status
+            echo -e "  活跃用户: $(db_user_count 2>/dev/null || echo 0)"
+            echo -e "  安装路径: ${SB_ROOT}"
+            ;;
+        restart)
+            sb_restart && log_ok "sing-box 已重启" || log_error "重启失败"
+            ;;
+        stop)
+            sb_stop && log_ok "sing-box 已停止" || log_warn "停止失败"
+            _load_module "traffic-collector.sh"
+            traffic_daemon_stop
+            ;;
+        logs)
+            local lines="${1:-50}"
+            if [[ -f "/opt/sb/logs/sing-box.log" ]]; then
+                tail -n "$lines" "/opt/sb/logs/sing-box.log"
+            else
+                log_warn "日志文件不存在"
+            fi
+            ;;
+        help|--help|-h)
+            show_help
+            ;;
+        *)
+            log_error "未知命令: $cmd"
+            show_help
+            return 1
+            ;;
+    esac
+}
+
+main "$@"

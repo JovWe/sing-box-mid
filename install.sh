@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #===============================================================================
-# Sing-box Manager - 一键安装脚本 (精简版)
+# Sing-box Manager - 一键安装脚本
 # 用法: bash <(curl -Ls https://raw.githubusercontent.com/JovWe/sing-box-mid/main/install.sh)
 #===============================================================================
 set -euo pipefail
 
 # ============ 配置 ============
 GITHUB_REPO="https://raw.githubusercontent.com/JovWe/sing-box-mid/main"
-SB_ROOT="/opt/sb-manager"
+SB_ROOT="/opt/sb"
 SB_SCRIPTS="${SB_ROOT}/scripts"
 SB_MODULES="${SB_SCRIPTS}/modules"
 SB_PROTOCOL="${SB_MODULES}/protocol-gen"
@@ -16,18 +16,21 @@ SB_CONFIG="${SB_ROOT}/core/config"
 SB_DATA="${SB_ROOT}/data"
 SB_CERTS="${SB_ROOT}/certs"
 SB_LOGS="${SB_ROOT}/logs"
+SB_WWW="${SB_ROOT}/www"
 
 INSTALL_FILES=(
-    "scripts/manager.sh"
-    "scripts/modules/utils.sh"
+    "scripts/sb"
+    "scripts/modules/db.sh"
     "scripts/modules/user-manager.sh"
     "scripts/modules/outbound-manager.sh"
     "scripts/modules/config-generator.sh"
+    "scripts/modules/traffic-collector.sh"
     "scripts/modules/protocol-gen/vless-reality.sh"
     "scripts/modules/protocol-gen/hysteria2.sh"
     "scripts/modules/protocol-gen/tuic.sh"
     "scripts/modules/protocol-gen/shadowtls.sh"
     "scripts/modules/protocol-gen/vmess.sh"
+    "scripts/sub-api/sub.sh"
 )
 
 # ============ 颜色 / 日志 ============
@@ -39,28 +42,37 @@ log_ok()    { echo -e "${GREEN}[OK]${NC}     $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
-# ============ 1. 依赖 ============
-install_deps() {
-    local need=0
-    for cmd in curl jq openssl systemctl ss; do
-        command -v "$cmd" &>/dev/null || need=1
-    done
-    [[ $need -eq 0 ]] && { log_ok "依赖已就绪"; return; }
-    if command -v apt-get &>/dev/null; then
-        apt-get update -qq >/dev/null 2>&1 || true
-        apt-get install -y -qq curl wget jq openssl ca-certificates iproute2 procps >/dev/null 2>&1 || true
-    elif command -v yum &>/dev/null; then
-        yum install -y -q curl wget jq openssl ca-certificates iproute2 procps-ng >/dev/null 2>&1 || true
-    fi
-    log_ok "依赖安装完成"
-}
-
-# ============ 2. 检测系统 ============
+# ============ 1. 检测系统 ============
 detect_os() {
     [[ -f /etc/os-release ]] && . /etc/os-release
     ID="${ID:-unknown}"
     ARCH="$(uname -m)"
     log_info "系统: $ID  架构: $ARCH"
+    if ! command -v apt-get &>/dev/null && ! command -v yum &>/dev/null; then
+        log_error "仅支持 Debian/Ubuntu/CentOS 系系统"
+        exit 1
+    fi
+}
+
+# ============ 2. 安装依赖 ============
+install_deps() {
+    log_info "安装基础依赖..."
+    local pkgs=(curl wget jq openssl sqlite3 ca-certificates iproute2 procps iptables)
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq >/dev/null 2>&1 || true
+        apt-get install -y -qq "${pkgs[@]}" >/dev/null 2>&1 || true
+    elif command -v yum &>/dev/null; then
+        yum install -y -q "${pkgs[@]}" >/dev/null 2>&1 || true
+    fi
+    # python3 (用于 uuid 生成)
+    command -v python3 &>/dev/null || {
+        if command -v apt-get &>/dev/null; then
+            apt-get install -y -qq python3 >/dev/null 2>&1 || true
+        else
+            yum install -y -q python3 >/dev/null 2>&1 || true
+        fi
+    }
+    log_ok "依赖安装完成"
 }
 
 # ============ 3. 下载脚本 ============
@@ -75,7 +87,7 @@ download_scripts() {
             failed=1
         fi
     done
-    chmod +x "${SB_SCRIPTS}/manager.sh"
+    chmod +x "${SB_SCRIPTS}/sb" "${SB_SCRIPTS}/sub-api/sub.sh"
     [[ $failed -eq 1 ]] && { log_error "部分脚本下载失败, 请检查网络"; exit 1; }
     log_ok "脚本部署完成"
 }
@@ -115,20 +127,30 @@ install_singbox_kernel() {
     log_ok "Sing-box ${tag} 安装完成"
 }
 
-# ============ 5. 目录 + 数据文件 ============
-init_dirs() {
+# ============ 5. 初始化目录 + 数据库 ============
+init_system() {
     log_info "初始化目录结构..."
     mkdir -p "${SB_BIN}" "${SB_CONFIG}/inbound" "${SB_CONFIG}/outbound" \
              "${SB_DATA}" "${SB_CERTS}" "${SB_LOGS}" \
-             "${SB_SCRIPTS}" "${SB_MODULES}" "${SB_PROTOCOL}"
+             "${SB_SCRIPTS}" "${SB_MODULES}" "${SB_PROTOCOL}" \
+             "${SB_WWW}"
 
-    [[ ! -f "${SB_DATA}/users.json" ]]    && echo '{"version":1,"users":{}}' > "${SB_DATA}/users.json"
-    [[ ! -f "${SB_DATA}/outbounds.json" ]] && echo '{"version":1,"outbounds":[{"id":"out_direct","name":"直连","type":"direct","tag":"direct","builtin":true,"config":{"type":"direct","tag":"direct"}}],"strategy_groups":[{"id":"sg_default","name":"默认出站","type":"selector","default":"out_direct","outbounds":["out_direct"]}]}' > "${SB_DATA}/outbounds.json"
-    [[ ! -f "${SB_DATA}/settings.json" ]] && echo '{"version":1,"domain":"","installed_protocols":[],"installed_at":0}' > "${SB_DATA}/settings.json"
-    log_ok "目录结构创建完成"
+    # 初始化数据库
+    source "${SB_MODULES}/db.sh"
+    db_init
+
+    log_ok "目录结构和数据库初始化完成"
 }
 
-# ============ 6. systemd 服务 ============
+# ============ 6. 生成订阅令牌 ============
+setup_subscription() {
+    local token
+    token=$(openssl rand -hex 16)
+    echo "$token" > "${SB_DATA}/sub_token.txt"
+    log_ok "订阅令牌: $token"
+}
+
+# ============ 7. systemd 服务 ============
 create_services() {
     log_info "创建 systemd 服务..."
 
@@ -141,7 +163,7 @@ After=network.target nss-lookup.target
 [Service]
 Type=simple
 User=root
-ExecStart=/opt/sb-manager/bin/sing-box run -c /opt/sb-manager/core/config/config.json
+ExecStart=/opt/sb/bin/sing-box run -c /opt/sb/core/config/config.json
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=1000000
@@ -154,49 +176,21 @@ EOF
 
     systemctl daemon-reload
     systemctl enable sing-box &>/dev/null || true
-    log_ok "systemd 服务创建完成"
+    log_ok "sing-box systemd 服务创建完成"
 }
 
-# ============ 7. 生成最小可用配置 ============
+# ============ 8. 生成初始配置 ============
 generate_initial_config() {
-    log_info "生成初始主配置..."
-    if ! bash "${SB_SCRIPTS}/manager.sh" reload >/dev/null 2>&1; then
-        # 兜底: 写一个最小配置
-        cat > "${SB_CONFIG}/config.json" << 'EOF'
-{
-  "log": {"level": "warn", "output": "/opt/sb-manager/logs/sing-box.log", "timestamp": true},
-  "inbounds": [],
-  "outbounds": [
-    {"type":"selector","tag":"proxy","outbounds":["direct"],"default":"direct"},
-    {"type":"direct","tag":"direct"},
-    {"type":"block","tag":"block"}
-  ],
-  "route": {
-    "final": "proxy",
-    "auto_detect_interface": true,
-    "rules": [
-      {"rule_set": "geoip-cn", "outbound": "direct"},
-      {"rule_set": "geosite-geolocation-cn", "outbound": "direct"},
-      {"domain_suffix": [".cn"], "outbound": "direct"}
-    ],
-    "rule_set": [
-      {"tag": "geoip-cn", "type": "remote", "format": "binary",
-       "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip/cn.srs",
-       "download_detour": "direct"},
-      {"tag": "geosite-geolocation-cn", "type": "remote", "format": "binary",
-       "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-geolocation-cn.srs",
-       "download_detour": "direct"}
-    ]
-  }
-}
-EOF
-    fi
-    log_ok "初始主配置生成完成"
+    log_info "生成初始配置..."
+    # 先 source config-generator 生成空配置
+    source "${SB_MODULES}/config-generator.sh"
+    generate_config
+    log_ok "初始配置已生成"
 }
 
-# ============ 8. 系统优化 (BBR + sysctl + ulimit) ============
+# ============ 9. 系统优化 ============
 optimize_system() {
-    log_info "执行系统优化 (BBR + sysctl + ulimit)..."
+    log_info "执行系统优化 (BBR + sysctl)..."
     cat > /etc/sysctl.d/99-sing-box.conf << 'EOF'
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
@@ -208,25 +202,15 @@ net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
 EOF
     sysctl -p /etc/sysctl.d/99-sing-box.conf &>/dev/null || true
-
-    cat > /etc/security/limits.d/sing-box.conf << 'EOF'
-* soft nofile 655360
-* hard nofile 655360
-* soft nproc 65536
-* hard nproc 65536
-EOF
     log_ok "系统优化完成"
 }
 
-# ============ 9. 安装 CLI 工具 ============
+# ============ 10. 安装 CLI 工具 ============
 install_cli() {
-    log_info "安装 sb-manager 命令行工具..."
-    cat > /usr/local/bin/sb-manager << 'CLI'
-#!/usr/bin/env bash
-exec bash /opt/sb-manager/scripts/manager.sh "$@"
-CLI
-    chmod +x /usr/local/bin/sb-manager
-    log_ok "命令行工具已安装: sb-manager"
+    log_info "安装 sb 命令行工具..."
+    cp "${SB_SCRIPTS}/sb" /usr/local/bin/sb
+    chmod +x /usr/local/bin/sb
+    log_ok "命令行工具已安装: sb"
 }
 
 # ============ Banner ============
@@ -240,14 +224,14 @@ show_banner() {
          ███████║██║██║ ╚████║╚██████╔╝
          ╚══════╝╚═╝╚═╝  ╚═══╝ ╚═════╝
 
-         ███╗   ███╗ █████╗ ███╗   ██╗ █████╗  ██████╗ ███████╗
-         ████╗ ████║██╔══██╗████╗  ██║██╔══██╗██╔════╝ ██╔════╝
-         ██╔████╔██║███████║██╔██╗ ██║███████║██║  ███╗█████╗
-         ██║╚██╔╝██║██╔══██║██║╚██╗██║██╔══██║██║   ██║██╔══╝
-         ██║ ╚═╝ ██║██║  ██║██║ ╚████║██║  ██║╚██████╔╝███████╗
-         ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝
+         ██████╗  ██████╗ ██╗  ██╗
+         ██╔══██╗██╔═══██╗██║ ██╔╝
+         ██████╔╝██║   ██║█████╔╝
+         ██╔══██╗██║   ██║██╔═██╗
+         ██████╔╝╚██████╔╝██║  ██╗
+         ╚═════╝  ╚═════╝ ╚═╝  ╚═╝
 
-            Sing-box VPS 中转站管理系统  (极简版)
+            Sing-box VPS 中转站管理系统  (SQLite版)
 
 EOF
 }
@@ -284,7 +268,6 @@ esac
 echo ""
 echo -e "已选择协议: ${BOLD}${PROTO_LIST:-无}${NC}"
 echo ""
-
 read -rp "确认安装? [Y/n] " confirm_install
 if [[ "${confirm_install,,}" == "n" ]]; then
     echo "已取消"
@@ -293,65 +276,75 @@ fi
 echo ""
 
 # ---- 执行安装流程 ----
-echo "[1/9] 检测系统 + 准备目录..."
+echo -e "\n${BOLD}[1/10]${NC} 检测系统..."
 detect_os
-init_dirs
 
-echo "[2/9] 安装基础依赖..."
+echo -e "\n${BOLD}[2/10]${NC} 安装基础依赖..."
 install_deps
 
-echo "[3/9] 下载管理脚本..."
+echo -e "\n${BOLD}[3/10]${NC} 创建目录结构..."
+mkdir -p "${SB_BIN}" "${SB_CONFIG}/inbound" "${SB_CONFIG}/outbound" \
+         "${SB_DATA}" "${SB_CERTS}" "${SB_LOGS}" \
+         "${SB_SCRIPTS}" "${SB_MODULES}" "${SB_PROTOCOL}" \
+         "${SB_WWW}"
+
+echo -e "\n${BOLD}[4/10]${NC} 下载管理脚本..."
 download_scripts
 
-echo "[4/9] 安装 Sing-box 内核..."
+echo -e "\n${BOLD}[5/10]${NC} 安装 Sing-box 内核..."
 install_singbox_kernel
 
-echo "[5/9] 创建 systemd 服务..."
+echo -e "\n${BOLD}[6/10]${NC} 初始化数据库..."
+source "${SB_MODULES}/db.sh"
+db_init
+
+echo -e "\n${BOLD}[7/10]${NC} 生成订阅令牌..."
+setup_subscription
+
+echo -e "\n${BOLD}[8/10]${NC} 创建 systemd 服务..."
 create_services
 
-echo "[6/9] 系统优化 (BBR + sysctl)..."
+echo -e "\n${BOLD}[9/10]${NC} 系统优化 (BBR + sysctl)..."
 optimize_system
 
-echo "[7/9] 生成初始主配置..."
-generate_initial_config
+echo -e "\n${BOLD}[10/10]${NC} 生成初始配置 + 安装 CLI..."
+# 生成初始配置
+source "${SB_MODULES}/config-generator.sh"
+generate_config
 
-echo "[8/9] 安装 CLI 命令行工具..."
-install_cli
-
-# 记录已安装协议
-if command -v jq &>/dev/null && [[ -n "$PROTO_LIST" ]]; then
-    proto_json="[\"$(echo "$PROTO_LIST" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' | paste -sd, | sed 's/,/","/g')\"]"
-    jq --argjson v "$proto_json" '.installed_protocols = $v | .installed_at = now' \
-        "${SB_DATA}/settings.json" > "${SB_DATA}/settings.json.tmp" \
-        && mv "${SB_DATA}/settings.json.tmp" "${SB_DATA}/settings.json"
-fi
-
-echo "[9/9] 启动 sing-box..."
-systemctl start sing-box &>/dev/null || true
+# 安装 CLI
+cp "${SB_SCRIPTS}/sb" /usr/local/bin/sb
+chmod +x /usr/local/bin/sb
 
 # ---- 完成 ----
 local_ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
 [[ -z "$local_ip" ]] && local_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
 
+SUB_TOKEN=$(cat "${SB_DATA}/sub_token.txt" 2>/dev/null || echo "(未设置)")
+
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║                                                              ║"
-echo "║           Sing-box Manager 安装完成! (极简版)                ║"
+echo "║           Sing-box Manager 安装完成! (SQLite版)              ║"
 echo "║                                                              ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo -e "公网 IP:    ${BOLD}${local_ip}${NC}"
-echo -e "管理命令:   ${BOLD}sb-manager help${NC}"
+echo -e "管理命令:   ${BOLD}sb help${NC}"
+echo -e "订阅令牌:   ${BOLD}${SUB_TOKEN}${NC}"
 echo -e "已装协议:   ${BOLD}${PROTO_LIST:-未装入站协议}${NC}"
 echo ""
 echo "下一步:"
-echo "  1. sb-manager add-user               添加用户"
-echo "  2. sb-manager add-outbound           添加上游出站"
-echo "  3. sb-manager status                 查看状态"
+echo "  1. sb add-user                     添加用户"
+echo "  2. sb add-outbound                 添加上游出站"
+echo "  3. sb status                       查看状态"
+echo ""
+echo "订阅地址 (需配置 Caddy/Nginx CGI):"
+echo "  http://你的域名/sub?token=${SUB_TOKEN}"
+echo "  http://你的域名/sub?user=<用户名>&token=${SUB_TOKEN}"
 echo ""
 echo "注意: 防火墙需手动放行端口, 例如:"
 echo "  ufw allow 443/tcp && ufw enable"
-echo "  或 iptables -A INPUT -p tcp --dport 443 -j ACCEPT"
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  安装完成! 享受使用吧 ~                                      ║"

@@ -48,7 +48,8 @@ show_help() {
   list-users                       列出所有用户
   delete-user <用户名>             删除用户
   show-config <用户名>             显示客户端配置
-  link <用户名>                    显示分享链接
+  link <用户名>                    显示单个分享链接
+  sub [用户名]                     输出分享链接 (所有/单个)
 
 出站管理:
   add-outbound [名称] [类型] [地址] [端口]  添加上游出站
@@ -95,6 +96,9 @@ main() {
         link)
             _load_module "user-manager.sh"
             gen_client_link "${1:-}"
+            ;;
+        sub)
+            bash "${SB_SCRIPTS}/sub-api/sub.sh" "${@}" 2>/dev/null
             ;;
         add-outbound)
             _load_module "outbound-manager.sh"

@@ -331,20 +331,39 @@ echo "╚═══════════════════════�
 echo ""
 echo -e "公网 IP:    ${BOLD}${local_ip}${NC}"
 echo -e "管理命令:   ${BOLD}sb help${NC}"
-echo -e "订阅令牌:   ${BOLD}${SUB_TOKEN}${NC}"
 echo -e "已装协议:   ${BOLD}${PROTO_LIST:-未装入站协议}${NC}"
 echo ""
-echo "下一步:"
-echo "  1. sb add-user                     添加用户"
-echo "  2. sb add-outbound                 添加上游出站"
-echo "  3. sb sub                          查看所有用户分享链接"
-echo "  4. sb sub <用户名>                 查看单个用户分享链接"
-echo "  5. sb status                       查看状态"
+
+# ---- 引导创建第一个用户 ----
+echo -e "${BOLD}是否立即创建第一个用户?${NC}"
+read -rp "用户名 (留空跳过): " FIRST_USER
+if [[ -n "$FIRST_USER" ]]; then
+    echo -e "选择协议:"
+    echo "  1) VLESS Reality  2) Hysteria2  3) TUIC v5  4) ShadowTLS v3  5) VMess"
+    read -rp "输入 [1-5] (默认: 1): " PC
+    case "${PC:-1}" in
+        1) PROTO="vless-reality" ;;
+        2) PROTO="hysteria2" ;;
+        3) PROTO="tuic" ;;
+        4) PROTO="shadowtls" ;;
+        5) PROTO="vmess" ;;
+        *) PROTO="vless-reality" ;;
+    esac
+    echo ""
+    echo -e "正在创建用户 ${BOLD}${FIRST_USER}${NC} (${PROTO})..."
+    sb add-user "$FIRST_USER" "$PROTO" 2>&1 || echo -e "${RED}创建失败, 安装后可手动运行: sb add-user${NC}"
+    echo ""
+    echo -e "${BOLD}分享链接:${NC}"
+    sb sub "$FIRST_USER" 2>/dev/null || true
+    echo ""
+fi
+
 echo ""
-echo "分享链接示例:"
-echo "  sb sub testuser"
-echo "  输出: vless://xxxxxxxx@66.154.104.22:443?...#testuser"
-echo "  直接复制到 v2rayN / Shadowrocket / Clash 等客户端使用"
+echo "下一步:"
+echo "  sb add-user                     添加更多用户"
+echo "  sb add-outbound                 添加上游出站 (SOCKS5/HTTP)"
+echo "  sb sub                          查看所有分享链接"
+echo "  sb status                       查看状态"
 echo ""
 echo "注意: 防火墙需手动放行端口, 例如:"
 echo "  ufw allow 443/tcp && ufw enable"

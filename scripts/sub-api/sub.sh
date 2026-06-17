@@ -70,6 +70,12 @@ gen_content() {
         gen_client_link "$target_user" 2>/dev/null || true
     else
         # 所有活跃用户
+        local total
+        total=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM users WHERE status='active';")
+        if [[ "$total" -eq 0 ]]; then
+            echo "没有活跃用户, 请先运行: sb add-user"
+            return 1
+        fi
         sqlite3 "$DB_FILE" "SELECT username FROM users WHERE status='active' ORDER BY id;" 2>/dev/null | while IFS= read -r u; do
             [[ -z "$u" ]] && continue
             gen_client_link "$u" 2>/dev/null || true
@@ -78,6 +84,7 @@ gen_content() {
 }
 
 content=$(gen_content "$user")
+[[ $? -ne 0 && -z "$content" ]] && content="没有活跃用户, 请先运行: sb add-user"
 
 # ---- 输出 ----
 if [[ $is_cgi -eq 1 ]]; then

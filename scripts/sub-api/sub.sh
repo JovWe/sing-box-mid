@@ -1,169 +1,89 @@
 #!/usr/bin/env bash
-# Sing-box Manager - CGI 订阅端点
-# 由 Caddy/Nginx CGI 调用
-# 依赖: /opt/sb/scripts/sb 环境
+# Sing-box Manager - 订阅生成 (IP-based, 分享链接)
+# 用法:
+#   CLI:  sb sub                     - 输出所有活跃用户的分享链接
+#         sb sub <username>          - 输出单个用户的分享链接
+#   CGI:  ?user=<name>&token=<key>   - 同 CLI, 输出 Content-Type
+# 输出: 标准分享链接, 每行一个 (vless://, hysteria2://, tuic://, shadowtls://, vmess://)
 
 set -euo pipefail
 
 SB_ROOT="/opt/sb"
 SB_MODULES="${SB_ROOT}/scripts/modules"
 DB_FILE="${SB_ROOT}/data/sb.db"
-
-# CGI 参数: ?token=<token> 或 ?user=<username>
-QUERY_STRING="${QUERY_STRING:-}"
-token=""
-user=""
-
-# 解析 QUERY_STRING
-IFS='&' read -ra params <<< "$QUERY_STRING"
-for p in "${params[@]}"; do
-    case "$p" in
-        token=*) token="${p#token=}" ;;
-        user=*)  user="${p#user=}" ;;
-    esac
-done
-
-# ---- 验证 Token ----
-# 使用安装时生成的订阅令牌
 SUB_TOKEN_FILE="${SB_ROOT}/data/sub_token.txt"
-if [[ -f "$SUB_TOKEN_FILE" ]]; then
-    local_token=$(cat "$SUB_TOKEN_FILE" 2>/dev/null || echo "")
-    if [[ -n "$local_token" && "$token" != "$local_token" ]]; then
-        echo "Content-Type: text/plain"
-        echo "Status: 403"
-        echo ""
-        echo "Forbidden: invalid token"
-        exit 0
-    fi
-fi
 
-# ---- 生成订阅 ----
-# 加载 DB 函数
+# ---- 加载 DB 模块 ----
 source "${SB_MODULES}/db.sh" 2>/dev/null || {
-    echo "Content-Type: text/plain"
-    echo "Status: 500"
-    echo ""
-    echo "Internal error"
+    echo "ERROR: 无法加载 db.sh" >&2
     exit 1
 }
 db_init
 
-# 构建 sing-box 出站列表 JSON
-outbounds_json="[]"
+# ---- 加载 user-manager (提供 gen_client_link) ----
+source "${SB_MODULES}/user-manager.sh" 2>/dev/null || true
 
-if [[ -n "$user" ]]; then
-    # 单个用户
-    local row
-    row=$(sqlite3 "$DB_FILE" -json "SELECT * FROM users WHERE username='$user' AND status='active';" 2>/dev/null | jq -r '.[0] // empty')
-    if [[ -z "$row" ]]; then
-        echo "Content-Type: text/plain"
-        echo "Status: 404"
-        echo ""
-        echo "User not found or disabled"
-        exit 0
-    fi
-    local proto port server
-    proto=$(echo "$row" | jq -r '.protocol')
-    port=$(echo "$row" | jq -r '.port')
-    server=$(get_public_ip)
+# ---- 解析参数 ----
+is_cgi=0
+token=""
+user=""
 
-    case "$proto" in
-        vless-reality)
-            local uuid pub sid sni
-            uuid=$(echo "$row" | jq -r '.credentials.uuid')
-            pub=$(echo "$row" | jq -r '.credentials.public_key')
-            sid=$(echo "$row" | jq -r '.credentials.short_id')
-            sni=$(echo "$row" | jq -r '.credentials.server_name')
-            outbounds_json=$(jq -n --arg s "$server" --argjson p "$port" --arg u "$uuid" \
-                --arg pk "$pub" --arg sn "$sid" --arg sni "$sni" \
-                '[{type:"vless", tag:"proxy", server:$s, server_port:$p, uuid:$u,
-                   flow:"xtls-rprx-vision",
-                   tls:{enabled:true, server_name:$sni,
-                        utls:{enabled:true, fingerprint:"chrome"},
-                        reality:{enabled:true, public_key:$pk, short_id:$sn}}}]')
-            ;;
-        hysteria2)
-            local pw; pw=$(echo "$row" | jq -r '.credentials.password')
-            outbounds_json=$(jq -n --arg s "$server" --argjson p "$port" --arg pw "$pw" \
-                '[{type:"hysteria2", tag:"proxy", server:$s, server_port:$p, password:$pw,
-                   tls:{enabled:true, server_name:$s, insecure:true, alpn:["h3"]}}]')
-            ;;
-        tuic)
-            local uuid pw; uuid=$(echo "$row" | jq -r '.credentials.uuid')
-            pw=$(echo "$row" | jq -r '.credentials.password')
-            outbounds_json=$(jq -n --arg s "$server" --argjson p "$port" --arg u "$uuid" --arg pw "$pw" \
-                '[{type:"tuic", tag:"proxy", server:$s, server_port:$p, uuid:$u, password:$pw,
-                   tls:{enabled:true, server_name:$s, alpn:["h3"]}, congestion_control:"bbr"}]')
-            ;;
-        shadowtls)
-            local pw; pw=$(echo "$row" | jq -r '.credentials.password')
-            outbounds_json=$(jq -n --arg s "$server" --argjson p "$port" --arg pw "$pw" \
-                '[{type:"shadowtls", tag:"proxy", server:$s, server_port:$p, version:3, password:$pw,
-                   tls:{enabled:true, server_name:"www.bing.com",
-                        utls:{enabled:true, fingerprint:"chrome"}}}]')
-            ;;
-        vmess)
-            local uuid; uuid=$(echo "$row" | jq -r '.credentials.uuid')
-            outbounds_json=$(jq -n --arg s "$server" --argjson p "$port" --arg u "$uuid" \
-                '[{type:"vmess", tag:"proxy", server:$s, server_port:$p, uuid:$u, security:"auto"}]')
-            ;;
-    esac
-else
-    # 所有活跃用户
-    while IFS='|' read -r username proto port; do
-        local row
-        row=$(sqlite3 "$DB_FILE" -json "SELECT * FROM users WHERE username='$username';" 2>/dev/null | jq -r '.[0] // empty')
-        [[ -z "$row" ]] && continue
-        local server; server=$(get_public_ip)
-        local user_ob=""
-        case "$proto" in
-            vless-reality)
-                local uuid pub sid sni
-                uuid=$(echo "$row" | jq -r '.credentials.uuid')
-                pub=$(echo "$row" | jq -r '.credentials.public_key')
-                sid=$(echo "$row" | jq -r '.credentials.short_id')
-                sni=$(echo "$row" | jq -r '.credentials.server_name')
-                user_ob=$(jq -n --arg s "$server" --argjson p "$port" --arg u "$uuid" \
-                    --arg pk "$pub" --arg sn "$sid" --arg sni "$sni" \
-                    '{type:"vless", tag:"'$username'", server:$s, server_port:$p, uuid:$u,
-                      flow:"xtls-rprx-vision",
-                      tls:{enabled:true, server_name:$sni,
-                           utls:{enabled:true, fingerprint:"chrome"},
-                           reality:{enabled:true, public_key:$pk, short_id:$sn}}}')
-                ;;
-            hysteria2)
-                local pw; pw=$(echo "$row" | jq -r '.credentials.password')
-                user_ob=$(jq -n --arg s "$server" --argjson p "$port" --arg pw "$pw" \
-                    '{type:"hysteria2", tag:"'$username'", server:$s, server_port:$p, password:$pw,
-                      tls:{enabled:true, server_name:$s, insecure:true, alpn:["h3"]}}')
-                ;;
-            tuic)
-                local uuid pw; uuid=$(echo "$row" | jq -r '.credentials.uuid')
-                pw=$(echo "$row" | jq -r '.credentials.password')
-                user_ob=$(jq -n --arg s "$server" --argjson p "$port" --arg u "$uuid" --arg pw "$pw" \
-                    '{type:"tuic", tag:"'$username'", server:$s, server_port:$p, uuid:$u, password:$pw,
-                      tls:{enabled:true, server_name:$s, alpn:["h3"]}, congestion_control:"bbr"}')
-                ;;
-            shadowtls)
-                local pw; pw=$(echo "$row" | jq -r '.credentials.password')
-                user_ob=$(jq -n --arg s "$server" --argjson p "$port" --arg pw "$pw" \
-                    '{type:"shadowtls", tag:"'$username'", server:$s, server_port:$p, version:3, password:$pw,
-                      tls:{enabled:true, server_name:"www.bing.com",
-                           utls:{enabled:true, fingerprint:"chrome"}}}')
-                ;;
-            vmess)
-                local uuid; uuid=$(echo "$row" | jq -r '.credentials.uuid')
-                user_ob=$(jq -n --arg s "$server" --argjson p "$port" --arg u "$uuid" \
-                    '{type:"vmess", tag:"'$username'", server:$s, server_port:$p, uuid:$u, security:"auto"}')
-                ;;
+if [[ -n "${QUERY_STRING:-}" ]]; then
+    is_cgi=1
+    IFS='&' read -ra params <<< "$QUERY_STRING"
+    for p in "${params[@]}"; do
+        case "$p" in
+            user=*)  user="${p#user=}" ;;
+            token=*) token="${p#token=}" ;;
         esac
-        if [[ -n "$user_ob" ]]; then
-            outbounds_json=$(echo "$outbounds_json" | jq --argjson ob "$user_ob" '. + [$ob]')
-        fi
-    done < <(sqlite3 "$DB_FILE" "SELECT username,protocol,port FROM users WHERE status='active';")
+    done
+else
+    user="${1:-}"
+    token="${2:-}"
 fi
 
-# 输出
-echo "Content-Type: application/json"
-echo ""
-echo "$outbounds_json" | jq '.'
+# ---- Token 验证 ----
+if [[ -f "$SUB_TOKEN_FILE" ]]; then
+    local_token=$(cat "$SUB_TOKEN_FILE" 2>/dev/null || echo "")
+    if [[ -n "$local_token" && "$token" != "$local_token" ]]; then
+        if [[ $is_cgi -eq 1 ]]; then
+            echo "Content-Type: text/plain"
+            echo "Status: 403"
+            echo ""
+            echo "Forbidden: invalid token"
+        else
+            echo "ERROR: 无效的订阅令牌" >&2
+        fi
+        exit 0
+    fi
+fi
+
+# ---- 生成内容 ----
+gen_content() {
+    local target_user="$1"
+    if [[ -n "$target_user" ]]; then
+        # 单个用户
+        local row
+        row=$(sqlite3 "$DB_FILE" "SELECT username,status FROM users WHERE username='$target_user';" 2>/dev/null)
+        [[ -z "$row" ]] && { echo "ERROR: 用户不存在: $target_user" >&2; return 1; }
+        echo "$row" | grep -q '|active' || { echo "ERROR: 用户已停用: $target_user" >&2; return 1; }
+        gen_client_link "$target_user" 2>/dev/null || true
+    else
+        # 所有活跃用户
+        sqlite3 "$DB_FILE" "SELECT username FROM users WHERE status='active' ORDER BY id;" 2>/dev/null | while IFS= read -r u; do
+            [[ -z "$u" ]] && continue
+            gen_client_link "$u" 2>/dev/null || true
+        done
+    fi
+}
+
+content=$(gen_content "$user")
+
+# ---- 输出 ----
+if [[ $is_cgi -eq 1 ]]; then
+    echo "Content-Type: text/plain; charset=utf-8"
+    echo ""
+    echo "$content"
+else
+    echo "$content"
+fi
